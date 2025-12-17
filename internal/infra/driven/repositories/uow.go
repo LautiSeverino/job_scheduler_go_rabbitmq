@@ -94,3 +94,13 @@ func (ds *DataStore) Atomic(ctx context.Context, cb ports.FAtomicCallback) (err 
 func (ds *DataStore) Job() ports.IJobRepository {
 	return NewJobRepository(ds.tx, ds.pool)
 }
+func (ds *DataStore) Attempt() ports.IAttemptRepository {
+	return NewAttemptRepository(ds.tx, ds.pool)
+}
+func (ds *DataStore) Event() ports.IEventRepository {
+	return NewEventRepository(ds.tx, ds.pool)
+}
+
+// func (ds *DataStore) DeadLetter() ports.IDeadLetterRepository {
+// 	return NewDeadLetterRepository(ds.tx, ds.pool)
+// }

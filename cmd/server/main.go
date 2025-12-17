@@ -39,25 +39,19 @@ func main() {
 	// Crear el router
 	router := mux.NewRouter()
 
-	//Router privado
-	privateRouter := router.PathPrefix("/").Subrouter()
-
-	//Router publico
-	publicRouter := router.PathPrefix("/").Subrouter()
-
 	//Job
-	jobService := service.NewJobService(uow)
+	jobService := service.NewJobService(uow, nil, nil)
 	jobHandler := handler.NewJobHandler(jobService)
-	jobHandler.RegisterPrivateRoutes(privateRouter)
-	jobHandler.RegisterPublicRoutes(publicRouter)
+	handler.RegisterJobRoutes(router, jobHandler)
 
-	// Configuración para manejar las señales del sistema (graceful shutdown)
+	// Config para manejar las señales del sistema (graceful shutdown)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
 	// Iniciar el servidor HTTP
 	server := &http.Server{
-		Addr: ":" + os.Getenv("JOBS_SERVICE_PORT"),
+		Addr:    "0.0.0.0:8000",
+		Handler: router,
 	}
 
 	go func() {

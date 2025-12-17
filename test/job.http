@@ -1,0 +1,26 @@
+@baseUrl = http://127.0.0.1:8000
+
+### 1️⃣ Crear Job
+POST {{baseUrl}}/jobs
+Content-Type: application/json
+
+{
+  "type": "test_callback",
+  "callback_url": "https://httpbin.org/post",
+  "payload": {
+    "hello": "world"
+  },
+  "max_retries": 3,
+  "priority": 1
+}
+
+###
+
+### 2️⃣ Obtener Job por ID
+# ⚠️ Reemplazá {{jobId}} por el id devuelto en el POST
+GET {{baseUrl}}/jobs/{{jobId}}
+
+###
+
+### 3️⃣ Obtener Timeline del Job
+GET {{baseUrl}}/jobs/{{jobId}}/timeline

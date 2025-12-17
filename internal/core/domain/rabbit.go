@@ -13,3 +13,13 @@ type RabbitJobMessage struct {
 	Payload     json.RawMessage `json:"payload"`
 	Attempt     int             `json:"attempt"`
 }
+
+func NewRabbitJobMessageFromJob(job Job) RabbitJobMessage {
+	return RabbitJobMessage{
+		JobID:       job.ID,
+		Type:        job.Type,
+		CallbackURL: job.CallbackURL,
+		Payload:     job.Payload,
+		Attempt:     1,
+	}
+}

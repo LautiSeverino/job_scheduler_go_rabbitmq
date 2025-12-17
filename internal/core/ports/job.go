@@ -9,65 +9,61 @@ import (
 	"github.com/gorilla/mux"
 )
 
+type IJobHandler interface {
+	RegisterRouter(router *mux.Router)
+	Create() http.HandlerFunc
+	GetOne() http.HandlerFunc
+	GetTimeline() http.HandlerFunc
+}
+
 type IJobService interface {
-
-	//Registrar trabajos
 	Create(ctx context.Context, input domain.CreateJobInput) (*domain.Job, error)
-
-	//Detectar jobs vencidos y encolarlos
-	EnqueueDueJobs(ctx context.Context) error
-
-	//Tomar un job para ejecutar
-	LockNextJob(ctx context.Context, workerID string) (*domain.Job, error)
-
-	//Ejecutar ciclo de vida
-	MarkJobRunning(ctx context.Context, jobID uuid.UUID) error
-	MarkJobSuccess(ctx context.Context, jobID uuid.UUID) error
-	MarkJobFailed(ctx context.Context, jobID uuid.UUID, errMsg string, httpStatus *int) error
-
-	// Reintentos
-	RetryJob(ctx context.Context, jobID uuid.UUID) error
-
-	// Dead Letter
-	MoveToDeadLetter(ctx context.Context, jobID uuid.UUID, reason string) error
-
 	GetOne(ctx context.Context, params domain.JobSearchParams) (*domain.Job, error)
-	GetJobTimeline(ctx context.Context, jobID uuid.UUID) ([]domain.JobEvent, error)
+	GetTimeline(ctx context.Context, jobID uuid.UUID) ([]domain.Event, error)
+}
+
+type IJobExecutionService interface {
+	ProcessJobMessage(ctx context.Context, msg domain.RabbitJobMessage) error
 }
 
 type IJobRepository interface {
-	Insert(ctx context.Context, job domain.Job) (*domain.Job, error)
-	Update(ctx context.Context, job domain.Job) error
+	// Base
+	Insert(ctx context.Context, job domain.Job) error
 	GetOne(ctx context.Context, params domain.JobSearchParams) (*domain.Job, error)
 	Get(ctx context.Context, params domain.JobSearchParams) ([]domain.Job, error)
-	LockJob(ctx context.Context, jobID uuid.UUID, workerID string, status domain.JobStatus) error
+
+	// Dispatcher
+	//FindPendingReadyJobs(ctx context.Context, limit int) ([]domain.Job, error)
+	LockJob(ctx context.Context, jobID uuid.UUID, lockedBy string) error
+	MarkQueued(ctx context.Context, jobID uuid.UUID) error
+
+	// Worker
+	MarkRunning(ctx context.Context, jobID uuid.UUID) error
+	MarkCompleted(ctx context.Context, jobID uuid.UUID) error
+	MarkFailed(ctx context.Context, jobID uuid.UUID, errMsg string, httpStatus *int) error
+	MarkDead(ctx context.Context, jobID uuid.UUID, reason string) error
 }
 
-type IJobAttemptRepository interface {
-	Create(ctx context.Context, attempt domain.JobAttempt) error
-	UpdateStatus(ctx context.Context, attemptID uint64, status domain.AttemptStatus, errMsg *string, httpStatus *int) error
-
-	Get(ctx context.Context, params domain.JobAttemptSearchParams) ([]domain.JobAttempt, error)
-	Count(ctx context.Context, params domain.JobAttemptSearchParams) (int, error)
+// intento de ejecutar un job
+type IAttemptRepository interface {
+	Insert(ctx context.Context, attempt domain.Attempt) error
+	MarkSuccess(ctx context.Context, attemptID uuid.UUID) error
+	MarkFailed(ctx context.Context, attemptID uuid.UUID, errMsg string, httpStatus *int) error
+	Get(ctx context.Context, params domain.AttemptSearchParams) ([]domain.Attempt, error)
+	Count(ctx context.Context, params domain.AttemptSearchParams) (int, error)
 }
 
-type IJobEventRepository interface {
-	Insert(ctx context.Context, event domain.JobEvent) error
-	Get(ctx context.Context, params domain.JobEventSearchParams) ([]domain.JobEvent, error)
+type IEventRepository interface {
+	Insert(ctx context.Context, event domain.Event) error
+	Get(ctx context.Context, params domain.EventSearchParams) ([]domain.Event, error)
 }
 
 type IDeadLetterRepository interface {
-	Insert(ctx context.Context, dead domain.JobDeadLetter) error
-	Get(ctx context.Context, params domain.JobDeadLetterSearchParams) ([]domain.JobDeadLetter, error)
+	Insert(ctx context.Context, dead domain.DeadLetter) error
+	Get(ctx context.Context, params domain.DeadLetterSearchParams) ([]domain.DeadLetter, error)
 	Delete(ctx context.Context, jobID uuid.UUID) error
 }
 
-type IJobHandler interface {
-	Create() http.HandlerFunc
-	EnqueueDueJobs() http.HandlerFunc
-	RetryJob() http.HandlerFunc
-	GetOne() http.HandlerFunc
-	GetJobTimeline() http.HandlerFunc
-	RegisterPublicRoutes(router *mux.Router)
-	RegisterPrivateRoutes(router *mux.Router)
+type IJobExecutor interface {
+	Execute(ctx context.Context, job *domain.Job) domain.ExecutionResult
 }

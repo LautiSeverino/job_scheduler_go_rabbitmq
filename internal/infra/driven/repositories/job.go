@@ -6,9 +6,11 @@ import (
 	"job_scheduler_go_rabbitmq/internal/core/domain"
 	"job_scheduler_go_rabbitmq/internal/core/ports"
 	"job_scheduler_go_rabbitmq/utils"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -151,23 +153,47 @@ func (r *JobRepository) GetOne(ctx context.Context, params domain.JobSearchParam
 
 func (r *JobRepository) buildSearchParams(qb *utils.QueryBuilder, params domain.JobSearchParams) error {
 	if params.ID != nil {
-		qb.Query += fmt.Sprintf(" AND  = $%d", len(qb.Args)+1)
+		qb.Query += fmt.Sprintf(" AND j.id = $%d", len(qb.Args)+1)
 		qb.Args = append(qb.Args, params.ID)
 	}
 	if params.Status != nil {
-		qb.Query += fmt.Sprintf(" AND status = $%d", len(qb.Args)+1)
+		qb.Query += fmt.Sprintf(" AND j.status = $%d", len(qb.Args)+1)
 		qb.Args = append(qb.Args, params.Status)
 	}
 	if params.Type != nil {
-		qb.Query += fmt.Sprintf(" AND type = $%d", len(qb.Args)+1)
+		qb.Query += fmt.Sprintf(" AND j.type = $%d", len(qb.Args)+1)
 		qb.Args = append(qb.Args, params.Type)
+	}
+
+	if params.ReadyToRun != nil && *params.ReadyToRun {
+		now := time.Now()
+
+		qb.Query += fmt.Sprintf(
+			" AND (j.scheduled_at IS NULL OR j.scheduled_at <= $%d)",
+			len(qb.Args)+1,
+		)
+		qb.Args = append(qb.Args, now)
+	}
+
+	if params.LockFree != nil && *params.LockFree {
+		if params.LockTimeout != nil {
+			expiredAt := time.Now().Add(-*params.LockTimeout)
+
+			qb.Query += fmt.Sprintf(
+				" AND (j.locked_at IS NULL OR j.locked_at < $%d)",
+				len(qb.Args)+1,
+			)
+			qb.Args = append(qb.Args, expiredAt)
+		} else {
+			qb.Query += " AND j.locked_at IS NULL"
+		}
 	}
 
 	return nil
 }
 
 // Insert implements ports.IJobRepository.
-func (r *JobRepository) Insert(ctx context.Context, job domain.Job) (*domain.Job, error) {
+func (r *JobRepository) Insert(ctx context.Context, job domain.Job) error {
 	query := utils.QueryBuilder{
 		Query: `
 		INSERT INTO jobs
@@ -196,81 +222,206 @@ func (r *JobRepository) Insert(ctx context.Context, job domain.Job) (*domain.Job
 		},
 	}
 
-	_, err := r.tx.Exec(ctx, query.Query, query.Args...)
+	var err error
+
+	if r.tx != nil {
+		_, err = r.tx.Exec(ctx, query.Query, query.Args...)
+	} else {
+		_, err = r.pool.Exec(ctx, query.Query, query.Args...)
+	}
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute insert: %w", err)
-	}
-
-	return &job, nil
-
-}
-
-// LockJob implements ports.IJobRepository.
-func (r *JobRepository) LockJob(ctx context.Context, jobID uuid.UUID, workerID string, status domain.JobStatus) error {
-	query := utils.QueryBuilder{
-		Query: `
-		UPDATE jobs
-		SET locked_at = NOW(),
-		locked_by = $1,
-		status = $2,
-		updated_at = NOW()
-		WHERE id = $3 AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '5 minutes')
-		`,
-		Args: []any{
-			workerID,
-			status,
-			jobID,
-		},
-	}
-
-	cmdTag, err := r.tx.Exec(ctx, query.Query, query.Args...)
-	if err != nil {
-		return fmt.Errorf("failed to execute lock job: %w", err)
-	}
-	if cmdTag.RowsAffected() == 0 {
-		return fmt.Errorf("job is already locked or does not exist")
+		return fmt.Errorf("failed to execute insert: %w", err)
 	}
 
 	return nil
 }
 
-// Update implements ports.IJobRepository.
-func (r *JobRepository) Update(ctx context.Context, job domain.Job) error {
+// LockJob implements ports.IJobRepository.
+func (r *JobRepository) LockJob(ctx context.Context, jobID uuid.UUID, lockedBy string) error {
+	now := time.Now()
+	lockExpiry := now.Add(-5 * time.Minute)
+
 	query := utils.QueryBuilder{
 		Query: `
-		UPDATE jobs
-		SET type = $1,
-		callback_url = $2,
-		payload = $3,
-		status = $4,
-		max_retries = $5,
-		scheduled_at = $6,
-		locked_at = $7,
-		locked_by = $8,
-		completed_at = $9,
-		priority = $10,
-		updated_at = $11
-		WHERE id = $12
+			UPDATE jobs
+			SET
+				locked_at = $1,
+				locked_by = $2,
+				updated_at = $1
+			WHERE id = $3
+			AND status = $4
+			AND (
+				locked_at IS NULL
+				OR locked_at < $5
+			)
 		`,
 		Args: []any{
-			job.Type,
-			job.CallbackURL,
-			job.Payload,
-			job.Status,
-			job.MaxRetries,
-			job.ScheduledAt,
-			job.LockedAt,
-			job.LockedBy,
-			job.CompletedAt,
-			job.Priority,
-			job.UpdatedAt,
-			job.ID,
+			now,
+			lockedBy,
+			jobID,
+			domain.JobStatusPending,
+			lockExpiry,
 		},
 	}
 
-	_, err := r.tx.Exec(ctx, query.Query, query.Args...)
+	var cmdTag pgconn.CommandTag
+	var err error
+
+	if r.tx != nil {
+		cmdTag, err = r.tx.Exec(ctx, query.Query, query.Args...)
+	} else {
+		cmdTag, err = r.pool.Exec(ctx, query.Query, query.Args...)
+	}
+
 	if err != nil {
-		return fmt.Errorf("failed to execute update: %w", err)
+		return fmt.Errorf("lock job failed: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return fmt.Errorf("job already locked or not pending")
+	}
+
+	return nil
+}
+
+// MarkCompleted implements ports.IJobRepository.
+func (r *JobRepository) MarkCompleted(ctx context.Context, jobID uuid.UUID) error {
+	query := utils.QueryBuilder{
+		Query: `
+		UPDATE jobs
+		SET
+			status = $1,
+			completed_at = $2,
+			locked_at = NULL,
+			locked_by = NULL,
+			updated_at = $2
+		WHERE id = $3
+		AND status = $4
+	`,
+		Args: []any{domain.JobStatusCompleted, time.Now(), jobID, domain.JobStatusRunning},
+	}
+	var err error
+
+	if r.tx != nil {
+		_, err = r.tx.Exec(ctx, query.Query, query.Args...)
+	} else {
+		_, err = r.pool.Exec(ctx, query.Query, query.Args...)
+	}
+
+	if err != nil {
+		return fmt.Errorf("mark completed failed: %w", err)
+	}
+	return nil
+}
+
+// MarkFailed implements ports.IJobRepository.
+func (r *JobRepository) MarkFailed(ctx context.Context, jobID uuid.UUID, errMsg string, httpStatus *int) error {
+	query := utils.QueryBuilder{
+		Query: `
+		UPDATE jobs
+		SET
+			status = $1,
+			locked_at = NULL,
+			locked_by = NULL,
+			updated_at = $2
+		WHERE id = $3
+		AND status = $4
+	`,
+		Args: []any{domain.JobStatusFailed, time.Now(), jobID, domain.JobStatusRunning},
+	}
+	var err error
+
+	if r.tx != nil {
+		_, err = r.tx.Exec(ctx, query.Query, query.Args...)
+	} else {
+		_, err = r.pool.Exec(ctx, query.Query, query.Args...)
+	}
+
+	if err != nil {
+		return fmt.Errorf("mark failed failed: %w", err)
+	}
+	return nil
+}
+
+// MarkQueued implements ports.IJobRepository.
+func (r *JobRepository) MarkQueued(ctx context.Context, jobID uuid.UUID) error {
+	query := utils.QueryBuilder{
+		Query: `
+		UPDATE jobs
+		SET
+			status = $1,
+			updated_at = $2
+		WHERE id = $3
+		AND status = $4
+	`,
+		Args: []any{domain.JobStatusQueued, time.Now(), jobID, domain.JobStatusPending},
+	}
+
+	var err error
+
+	if r.tx != nil {
+		_, err = r.tx.Exec(ctx, query.Query, query.Args...)
+	} else {
+		_, err = r.pool.Exec(ctx, query.Query, query.Args...)
+	}
+
+	if err != nil {
+		return fmt.Errorf("mark queued failed: %w", err)
+	}
+	return nil
+}
+
+// MarkRunning implements ports.IJobRepository.
+func (r *JobRepository) MarkRunning(ctx context.Context, jobID uuid.UUID) error {
+	query := utils.QueryBuilder{
+		Query: `
+		UPDATE jobs
+		SET
+			status = $1,
+			updated_at = $2
+		WHERE id = $3
+		AND status = $4
+	`,
+		Args: []any{domain.JobStatusRunning, time.Now(), jobID, domain.JobStatusQueued},
+	}
+	var err error
+
+	if r.tx != nil {
+		_, err = r.tx.Exec(ctx, query.Query, query.Args...)
+	} else {
+		_, err = r.pool.Exec(ctx, query.Query, query.Args...)
+	}
+	if err != nil {
+		return fmt.Errorf("mark running failed: %w", err)
+	}
+	return nil
+}
+
+// MarkDead implements ports.IJobRepository.
+func (r *JobRepository) MarkDead(ctx context.Context, jobID uuid.UUID, reason string) error {
+	query := utils.QueryBuilder{
+		Query: `
+		UPDATE jobs
+		SET
+			status = $1,
+			locked_at = NULL,
+			locked_by = NULL,
+			updated_at = $2
+		WHERE id = $3
+		AND status = $4
+	`,
+		Args: []any{domain.JobStatusDead, time.Now(), jobID, domain.JobStatusFailed},
+	}
+
+	var err error
+
+	if r.tx != nil {
+		_, err = r.tx.Exec(ctx, query.Query, query.Args...)
+	} else {
+		_, err = r.pool.Exec(ctx, query.Query, query.Args...)
+	}
+	if err != nil {
+		return fmt.Errorf("mark dead failed: %w", err)
 	}
 
 	return nil

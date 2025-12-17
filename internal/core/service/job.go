@@ -4,66 +4,213 @@ import (
 	"context"
 	"job_scheduler_go_rabbitmq/internal/core/domain"
 	"job_scheduler_go_rabbitmq/internal/core/ports"
+	"log"
+	"sort"
 
 	"github.com/google/uuid"
 )
 
 type JobService struct {
-	uow ports.IUnitOfWork
+	uow    ports.IUnitOfWork
+	exec   ports.IJobExecutor
+	rabbit ports.IRabbitMQClient
 }
 
-func NewJobService(uow ports.IUnitOfWork) ports.IJobService {
+func NewJobService(uow ports.IUnitOfWork, exec ports.IJobExecutor, rabbit ports.IRabbitMQClient) *JobService {
 	return &JobService{
-		uow: uow,
+		uow:    uow,
+		exec:   exec,
+		rabbit: rabbit,
 	}
 }
 
+var _ ports.IJobService = (*JobService)(nil)
+var _ ports.IJobExecutionService = (*JobService)(nil)
+
+func (s *JobService) ProcessJobMessage(
+	ctx context.Context,
+	msg domain.RabbitJobMessage,
+) error {
+
+	var retryMsg *domain.RabbitJobMessage
+
+	err := s.uow.Atomic(ctx, func(uow ports.IUnitOfWork) error {
+
+		// 1️⃣ Load job
+		job, err := uow.Job().GetOne(ctx, domain.JobSearchParams{
+			ID: &msg.JobID,
+		})
+		if err != nil {
+			return err
+		}
+
+		// 2️⃣ Idempotencia
+		if job.Status != domain.JobStatusQueued {
+			return nil
+		}
+
+		// 3️⃣ Mark running
+		if err := uow.Job().MarkRunning(ctx, job.ID); err != nil {
+			return err
+		}
+
+		// 4️⃣ Ejecutar callback (lado técnico)
+		result := s.exec.Execute(ctx, job)
+		// 5️⃣ SUCCESS
+		if result.Error == nil {
+			attempt := domain.NewAttempt(
+				job.ID,
+				msg.Attempt,
+				domain.AttemptStatusSuccess,
+				nil,
+				&result.HTTPStatus,
+			)
+
+			if err := uow.Attempt().Insert(ctx, attempt); err != nil {
+				return err
+			}
+
+			if err := uow.Job().MarkCompleted(ctx, job.ID); err != nil {
+				return err
+			}
+
+			if err := uow.Event().Insert(
+				ctx,
+				domain.NewJobSucceededEvent(job.ID),
+			); err != nil {
+				return err
+			}
+
+			return nil
+		}
+
+		// 6️⃣ FAILED
+		errMsg := result.Error.Error()
+
+		attempt := domain.NewAttempt(
+			job.ID,
+			msg.Attempt,
+			domain.AttemptStatusFailed,
+			&errMsg,
+			&result.HTTPStatus,
+		)
+
+		if err := uow.Attempt().Insert(ctx, attempt); err != nil {
+			return err
+		}
+
+		if msg.Attempt < job.MaxRetries {
+			if err := uow.Job().MarkFailed(ctx, job.ID, errMsg, nil); err != nil {
+				return err
+			}
+
+			if err := uow.Event().Insert(
+				ctx,
+				domain.NewJobFailedEvent(job.ID, errMsg),
+			); err != nil {
+				return err
+			}
+
+			next := msg
+			next.Attempt++
+			retryMsg = &next
+			return nil
+		}
+
+		// 7️⃣ DEAD
+		if err := uow.Job().MarkDead(ctx, job.ID, "max retries exceeded"); err != nil {
+			return err
+		}
+
+		return uow.Event().Insert(
+			ctx,
+			domain.NewJobDeadEvent(job.ID),
+		)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	if retryMsg != nil {
+		return s.rabbit.Publish(*retryMsg)
+	}
+
+	return nil
+}
+
 // Create implements ports.IJobService.
-func (j *JobService) Create(ctx context.Context, input domain.CreateJobInput) (*domain.Job, error) {
-	panic("unimplemented")
-}
+func (s *JobService) Create(ctx context.Context, input domain.CreateJobInput) (*domain.Job, error) {
+	job, err := domain.NewJob(input)
+	if err != nil {
+		return nil, err
+	}
 
-// EnqueueDueJobs implements ports.IJobService.
-func (j *JobService) EnqueueDueJobs(ctx context.Context) error {
-	panic("unimplemented")
-}
+	var createdJob *domain.Job
+	err = s.uow.Atomic(ctx, func(d ports.IUnitOfWork) error {
+		err = d.Job().Insert(ctx, *job)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 
-// GetJobTimeline implements ports.IJobService.
-func (j *JobService) GetJobTimeline(ctx context.Context, jobID uuid.UUID) ([]domain.JobEvent, error) {
-	panic("unimplemented")
+	log.Print("job ", createdJob)
+	return createdJob, nil
 }
 
 // GetOne implements ports.IJobService.
-func (j *JobService) GetOne(ctx context.Context, params domain.JobSearchParams) (*domain.Job, error) {
-	panic("unimplemented")
+func (s *JobService) GetOne(ctx context.Context, params domain.JobSearchParams) (*domain.Job, error) {
+	job, err := s.uow.Job().GetOne(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	return job, nil
 }
 
-// LockNextJob implements ports.IJobService.
-func (j *JobService) LockNextJob(ctx context.Context, workerID string) (*domain.Job, error) {
-	panic("unimplemented")
-}
+// GetTimeline implements ports.IJobService.
+func (s *JobService) GetTimeline(ctx context.Context, jobID uuid.UUID) ([]domain.Event, error) {
+	events, err := s.uow.Event().Get(ctx, domain.EventSearchParams{
+		JobID: &jobID,
+	})
+	if err != nil {
+		return nil, err
+	}
 
-// MarkJobFailed implements ports.IJobService.
-func (j *JobService) MarkJobFailed(ctx context.Context, jobID uuid.UUID, errMsg string, httpStatus *int) error {
-	panic("unimplemented")
-}
+	attempts, err := s.uow.Attempt().Get(ctx, domain.AttemptSearchParams{
+		JobID: &jobID,
+	})
+	if err != nil {
+		return nil, err
+	}
 
-// MarkJobRunning implements ports.IJobService.
-func (j *JobService) MarkJobRunning(ctx context.Context, jobID uuid.UUID) error {
-	panic("unimplemented")
-}
+	for _, a := range attempts {
+		var t domain.EventType
+		var msg string
 
-// MarkJobSuccess implements ports.IJobService.
-func (j *JobService) MarkJobSuccess(ctx context.Context, jobID uuid.UUID) error {
-	panic("unimplemented")
-}
+		if a.Status == domain.AttemptStatusSuccess {
+			t = domain.EventJobSucceeded
+			msg = "attempt succeeded"
+		} else {
+			t = domain.EventJobFailed
+			msg = "attempt failed"
+		}
 
-// MoveToDeadLetter implements ports.IJobService.
-func (j *JobService) MoveToDeadLetter(ctx context.Context, jobID uuid.UUID, reason string) error {
-	panic("unimplemented")
-}
+		events = append(events, domain.Event{
+			ID:        uuid.New(),
+			JobID:     jobID,
+			Type:      t,
+			Message:   msg,
+			CreatedAt: a.CreatedAt,
+		})
+	}
 
-// RetryJob implements ports.IJobService.
-func (j *JobService) RetryJob(ctx context.Context, jobID uuid.UUID) error {
-	panic("unimplemented")
+	sort.Slice(events, func(i, j int) bool {
+		return events[i].CreatedAt.Before(events[j].CreatedAt)
+	})
+
+	return events, nil
 }
