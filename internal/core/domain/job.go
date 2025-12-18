@@ -105,21 +105,6 @@ type EventSearchParams struct {
 	utils.SearchParams
 }
 
-// DeadLetter represents a job that has been moved to the dead-letter queue, dead jobs.
-type DeadLetter struct {
-	ID        uuid.UUID `db:"id" json:"id"`
-	JobID     uuid.UUID `db:"job_id" json:"job_id"`
-	Reason    string    `db:"reason" json:"reason"`
-	LastError *string   `db:"last_error" json:"last_error"`
-	FailedAt  time.Time `db:"failed_at" json:"failed_at"`
-}
-
-type DeadLetterSearchParams struct {
-	ID    *uuid.UUID
-	JobID *uuid.UUID
-	utils.SearchParams
-}
-
 // JobExecutionRequest represents the payload sent to execute a job.
 type JobExecutionRequest struct {
 	JobID   uuid.UUID       `json:"job_id"`

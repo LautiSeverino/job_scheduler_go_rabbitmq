@@ -22,7 +22,6 @@ CREATE TABLE job_attempts (
     job_id UUID NOT NULL REFERENCES jobs(id),
     attempt_number INT NOT NULL,
     started_at TIMESTAMPTZ NOT NULL,
-    finished_at TIMESTAMPTZ,
     status TEXT NOT NULL, 
     error_message TEXT,
     http_status INT,
@@ -44,11 +43,5 @@ CREATE TABLE job_events (
 CREATE INDEX idx_job_events_job_id ON job_events(job_id);
 
 
-CREATE TABLE job_dead_letters (
-    id UUID PRIMARY KEY,
-    job_id UUID NOT NULL REFERENCES jobs(id),
-    reason TEXT NOT NULL,
-    last_error TEXT,
-    failed_at TIMESTAMPTZ NOT NULL
-);
+
 

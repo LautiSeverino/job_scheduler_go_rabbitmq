@@ -33,7 +33,6 @@ type IJobRepository interface {
 	Get(ctx context.Context, params domain.JobSearchParams) ([]domain.Job, error)
 
 	// Dispatcher
-	//FindPendingReadyJobs(ctx context.Context, limit int) ([]domain.Job, error)
 	LockJob(ctx context.Context, jobID uuid.UUID, lockedBy string) error
 	MarkQueued(ctx context.Context, jobID uuid.UUID) error
 
@@ -56,12 +55,6 @@ type IAttemptRepository interface {
 type IEventRepository interface {
 	Insert(ctx context.Context, event domain.Event) error
 	Get(ctx context.Context, params domain.EventSearchParams) ([]domain.Event, error)
-}
-
-type IDeadLetterRepository interface {
-	Insert(ctx context.Context, dead domain.DeadLetter) error
-	Get(ctx context.Context, params domain.DeadLetterSearchParams) ([]domain.DeadLetter, error)
-	Delete(ctx context.Context, jobID uuid.UUID) error
 }
 
 type IJobExecutor interface {

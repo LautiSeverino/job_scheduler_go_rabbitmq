@@ -4,7 +4,6 @@ import (
 	"context"
 	"job_scheduler_go_rabbitmq/internal/core/domain"
 	"job_scheduler_go_rabbitmq/internal/core/ports"
-	"log"
 	"sort"
 
 	"github.com/google/uuid"
@@ -36,7 +35,7 @@ func (s *JobService) ProcessJobMessage(
 
 	err := s.uow.Atomic(ctx, func(uow ports.IUnitOfWork) error {
 
-		// 1️⃣ Load job
+		//  Load job
 		job, err := uow.Job().GetOne(ctx, domain.JobSearchParams{
 			ID: &msg.JobID,
 		})
@@ -44,19 +43,19 @@ func (s *JobService) ProcessJobMessage(
 			return err
 		}
 
-		// 2️⃣ Idempotencia
+		// Idempotencia
 		if job.Status != domain.JobStatusQueued {
 			return nil
 		}
 
-		// 3️⃣ Mark running
+		//  Mark running
 		if err := uow.Job().MarkRunning(ctx, job.ID); err != nil {
 			return err
 		}
 
-		// 4️⃣ Ejecutar callback (lado técnico)
+		//  Ejecutar callback (lado técnico)
 		result := s.exec.Execute(ctx, job)
-		// 5️⃣ SUCCESS
+		// SUCCESS
 		if result.Error == nil {
 			attempt := domain.NewAttempt(
 				job.ID,
@@ -84,7 +83,7 @@ func (s *JobService) ProcessJobMessage(
 			return nil
 		}
 
-		// 6️⃣ FAILED
+		//  FAILED
 		errMsg := result.Error.Error()
 
 		attempt := domain.NewAttempt(
@@ -117,7 +116,7 @@ func (s *JobService) ProcessJobMessage(
 			return nil
 		}
 
-		// 7️⃣ DEAD
+		//  DEAD
 		if err := uow.Job().MarkDead(ctx, job.ID, "max retries exceeded"); err != nil {
 			return err
 		}
@@ -146,7 +145,6 @@ func (s *JobService) Create(ctx context.Context, input domain.CreateJobInput) (*
 		return nil, err
 	}
 
-	var createdJob *domain.Job
 	err = s.uow.Atomic(ctx, func(d ports.IUnitOfWork) error {
 		err = d.Job().Insert(ctx, *job)
 		if err != nil {
@@ -158,8 +156,7 @@ func (s *JobService) Create(ctx context.Context, input domain.CreateJobInput) (*
 		return nil, err
 	}
 
-	log.Print("job ", createdJob)
-	return createdJob, nil
+	return job, nil
 }
 
 // GetOne implements ports.IJobService.

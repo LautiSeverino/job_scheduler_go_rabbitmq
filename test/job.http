@@ -16,11 +16,22 @@ Content-Type: application/json
 
 ###
 
+POST {{baseUrl}}/jobs
+Content-Type: application/json
+
+{
+  "type": "fail_test",
+  "callback_url": "http://localhost:9999/nope",
+  "payload": {},
+  "max_retries": 2
+}
+
+
 ### 2️⃣ Obtener Job por ID
 # ⚠️ Reemplazá {{jobId}} por el id devuelto en el POST
-GET {{baseUrl}}/jobs/{{jobId}}
+GET {{baseUrl}}/jobs
 
 ###
 
 ### 3️⃣ Obtener Timeline del Job
-GET {{baseUrl}}/jobs/{{jobId}}/timeline
+GET {{baseUrl}}/jobs/eafad3e5-67eb-48b0-97a9-b730a1171878k/timeline
